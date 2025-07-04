@@ -1,0 +1,12 @@
+ctest
+*.symvers
+compile_commands.json
+*.order
+.cache/
+test_watchpoint
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.o
+
