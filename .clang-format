@@ -1,0 +1,75 @@
+---
+Language:        Cpp
+BasedOnStyle:    LLVM
+
+# Indentation style
+UseTab:          Always
+TabWidth:        4
+IndentWidth:     4
+ContinuationIndentWidth: 8
+
+# Alignments
+AlignAfterOpenBracket: Align
+AlignEscapedNewlines: Right
+AlignOperands:   Align
+AlignTrailingComments:
+  Kind:            Always
+  OverEmptyLines:  1
+AlignConsecutiveAssignments:
+  Enabled:         true
+  AcrossComments:  true
+  PadOperators:    true
+AlignConsecutiveDeclarations:
+  Enabled:         true
+  AcrossComments:  true
+  PadOperators:    true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: true
+
+# Brace wrapping and layout
+BraceWrapping:
+  AfterControlStatement: Never
+  AfterFunction:   false
+  AfterStruct:     false
+  AfterUnion:      false
+  BeforeElse:      false
+  BeforeWhile:     false
+  IndentBraces:    false
+
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: All
+
+# Line limits
+ColumnLimit:     120
+
+# Pointer/reference alignment
+PointerAlignment: Right
+ReferenceAlignment: Pointer
+
+# Include management
+IncludeBlocks: Regroup
+SortIncludes: CaseSensitive
+IncludeCategories:
+  - Regex:           '^<([^/]+\.h)>$'      # system headers with no folder, e.g., <stdio.h>
+    Priority:        1
+    SortPriority:    0
+    CaseSensitive:   true
+
+  - Regex:           '^<.*>$'              # library headers with folders, e.g., <openssl/ssl.h>
+    Priority:        2
+    SortPriority:    0
+    CaseSensitive:   true
+
+  - Regex:           '^".*"$'              # project headers
+    Priority:        3
+    SortPriority:    0
+    CaseSensitive:   true
+
+# Miscellaneous
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParens: ControlStatements
+ReflowComments:  true
+...
+

@@ -1,29 +1,50 @@
-#include <linux/init.h>
-#include <linux/module.h>
-#include <linux/kobject.h>
+/*
+  * watchpoint-km is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * watchpoint-km is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.*
+ *
+ * file: watchpoint.c
+ * author: danylo volchenko <danylo.volchenko@gmail.com>
+ * $2025-07-05
+ *
+ * vim: set ts=4 sw=4 noet tw=120:
+ */
+
+
+/**********************************************************
+* Include files
+**********************************************************/
+#include <asm/debugreg.h>
 #include <linux/hw_breakpoint.h>
+#include <linux/init.h>
+#include <linux/kobject.h>
+#include <linux/module.h>
 #include <linux/perf_event.h>
 #include <linux/sysfs.h>
 #include <linux/uaccess.h>
-#include <asm/debugreg.h>
-#include "linux/mm.h"
-
-#define ASSERT(x)                                        \
-do {	if (x) break;                                    \
-	pr_emerg("### ASSERTION FAILED %s %s @ %d: %s\n",    \
-		__FILE__, __func__, __LINE__, #x); dump_stack(); \
-} while (0)
-
-static unsigned long watch_address = 0;
-static struct kobject *watch_kobj;
-module_param(watch_address, ulong, 0644);
-MODULE_PARM_DESC(watch_address, "Memory address to set the watchpoint");
+/**********************************************************
+* Macro definitions
+**********************************************************/
+#define ASSERT(x)                                                                                                      \
+	do {                                                                                                               \
+		if (x)                                                                                                         \
+			break;                                                                                                     \
+		pr_emerg("### ASSERTION FAILED %s %s @ %d: %s\n", __FILE__, __func__, __LINE__, #x);                           \
+		dump_stack();                                                                                                  \
+	} while (0)
 
 #if defined(__x86_64__) || defined(__aarch64__)
-    // These support 64bit length
-    #define HW_BREAKPOINT_LEN HW_BREAKPOINT_LEN_8
+	// These support 64bit length
+	#define HW_BREAKPOINT_LEN HW_BREAKPOINT_LEN_8
 #else
-    // Fallback to safe length
+	// Fallback to safe length
     #define HW_BREAKPOINT_LEN HW_BREAKPOINT_LEN_4
 #endif
 
@@ -33,14 +54,28 @@ MODULE_PARM_DESC(watch_address, "Memory address to set the watchpoint");
 #else	// x86, mips, i386, etc.
     #define HAS_READ_EXCLUSIVE_HW_BP 0
 #endif
-
+/**********************************************************
+* Function Prototypes
+**********************************************************/
+static ssize_t watch_address_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
+static ssize_t watch_address_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
+/**********************************************************
+* Variable declarations
+**********************************************************/
+static unsigned long watch_address = 0;
+static struct kobject *watch_kobj;
+static struct kobj_attribute watch_attr = __ATTR(watch_address, 0644, watch_address_show, watch_address_store);
+module_param(watch_address, ulong, 0644);
+MODULE_PARM_DESC(watch_address, "Memory address to set the watchpoint");
 #if HAS_READ_EXCLUSIVE_HW_BP
 static struct perf_event *__percpu *hw_breakpoint_R;
 static struct perf_event *__percpu *hw_breakpoint_W;
 #else
 static struct perf_event *__percpu *hw_breakpoint_RW;
 #endif
-
+/**********************************************************
+ * Functions
+ **********************************************************/
 static void __attribute__((unused)) print_user_registers(struct pt_regs *regs) {
 	struct pt_regs *r = regs;
 	pr_info("%s:\n"
@@ -110,9 +145,9 @@ static DEFINE_PER_CPU(u8[8], watched_mem);
 enum type { A_READ = 0, A_WRITE =1 };
 static s8 access_type = 0;
 
-static inline s32 snapshot_mem(void* dst) {
+static inline s32 snapshot_mem(void *dst) {
 	if (access_ok((const void __user *)watch_address, sizeof(dst))) {
-		 copy_from_user_nofault(dst, (const void __user*)watch_address, sizeof(dst));
+		copy_from_user_nofault(dst, (const void __user *)watch_address, sizeof(dst));
 	} else {
 		copy_from_kernel_nofault(dst, (void *)watch_address, sizeof(dst));
 	}
@@ -122,8 +157,8 @@ static inline s32 snapshot_mem(void* dst) {
 
 static void breakpoint_handler(struct perf_event *bp, struct perf_sample_data *data, struct pt_regs *regs) {
 	preempt_disable();
-	this_cpu_write(last_bp_ip, instruction_pointer(regs));
-	u8 *mem_prev = this_cpu_ptr(watched_mem);
+		this_cpu_write(last_bp_ip, instruction_pointer(regs));
+		u8 *mem_prev = this_cpu_ptr(watched_mem);
 	preempt_enable();
 
 	u8 mem_curr[8];
@@ -200,8 +235,8 @@ static s32 set_watchpoint(void) {
 	}
 #else
 	preempt_disable();
-	u8 *mem_prev = this_cpu_ptr(watched_mem);
-	snapshot_mem(mem_prev);
+		u8 *mem_prev = this_cpu_ptr(watched_mem);
+		snapshot_mem(mem_prev);
 	preempt_enable();
 	hw_breakpoint_RW = register_wide_hw_breakpoint(&attr_RW, breakpoint_handler, NULL);
 	if (IS_ERR(hw_breakpoint_RW)) {
@@ -265,8 +300,6 @@ static ssize_t watch_address_store(struct kobject *kobj, struct kobj_attribute *
 	set_watchpoint();
 	return count;
 }
-
-static struct kobj_attribute watch_attr = __ATTR(watch_address, 0644, watch_address_show, watch_address_store);
 
 static s32 __init watchpoint_init(void) {
 

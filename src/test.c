@@ -14,7 +14,7 @@ int main(void) {
 	(void)getchar();
 
 	*target = 'A';	// WRITE
-	asm volatile ("nop");
+	asm volatile ("nop");	// helps navigate in disasm of this code
 
 	char value = *target;	// READ
 	asm volatile ("nop");
