@@ -32,12 +32,12 @@
 /**********************************************************
 * Macro definitions
 **********************************************************/
-#define ASSERT(x)                                                                                                      \
-	do {                                                                                                               \
-		if (x)                                                                                                         \
-			break;                                                                                                     \
-		pr_emerg("### ASSERTION FAILED %s %s @ %d: %s\n", __FILE__, __func__, __LINE__, #x);                           \
-		dump_stack();                                                                                                  \
+#define ASSERT(x)                                                                            \
+	do {                                                                                     \
+		if (x)                                                                               \
+			break;                                                                           \
+		pr_emerg("### ASSERTION FAILED %s %s @ %d: %s\n", __FILE__, __func__, __LINE__, #x); \
+		dump_stack();                                                                        \
 	} while (0)
 
 #if defined(__x86_64__) || defined(__aarch64__)
@@ -54,6 +54,8 @@
 #else	// x86, mips, i386, etc.
     #define HAS_READ_EXCLUSIVE_HW_BP 0
 #endif
+
+#define AVAIL_SLOTS hw_breakpoint_slots(TYPE_DATA)
 /**********************************************************
 * Function Prototypes
 **********************************************************/
@@ -62,16 +64,24 @@ static ssize_t watch_address_store(struct kobject *kobj, struct kobj_attribute *
 /**********************************************************
 * Variable declarations
 **********************************************************/
-static unsigned long watch_address = 0;
-static struct kobject *watch_kobj;
+static struct watchpoint {
+	s32 idx;
+	ulong addr;
+	struct kobj_attribute attr;
+} watchpoints[AVAIL_SLOTS] = {0,};
+static ulong watch_addrs[AVAIL_SLOTS] = {0,};
+static s32 num_addrs = 0;
+static struct kobject *watch_kobj = NULL;
 static struct kobj_attribute watch_attr = __ATTR(watch_address, 0644, watch_address_show, watch_address_store);
-module_param(watch_address, ulong, 0644);
-MODULE_PARM_DESC(watch_address, "Memory address to set the watchpoint");
+
+module_param_array_named(watch_addresses, watch_addrs, ulong, &num_addrs, 0644);
+MODULE_PARM_DESC(watch_addresses, "Memory addresses to set the watchpoints");
+
 #if HAS_READ_EXCLUSIVE_HW_BP
-static struct perf_event *__percpu *hw_breakpoint_R;
-static struct perf_event *__percpu *hw_breakpoint_W;
+static struct perf_event *__percpu *hw_breakpoint_R[AVAIL_SLOTS/2] = {0,};
+static struct perf_event *__percpu *hw_breakpoint_W[AVAIL_SLOTS/2] = {0,};
 #else
-static struct perf_event *__percpu *hw_breakpoint_RW;
+static struct perf_event *__percpu *hw_breakpoint_RW[AVAIL_SLOTS] = {0,};
 #endif
 /**********************************************************
  * Functions
@@ -105,15 +115,6 @@ static void print_debug_registers(void) {
 			dr[0], dr[1], dr[2], dr[3], dr[4], dr[5]);
 }
 
-static u8 get_hw_bp_slots(void) {
-	static u8 slots;
-
-	if (!slots)
-		slots = hw_breakpoint_slots(TYPE_DATA);
-
-	return slots;
-}
-
 #if HAS_READ_EXCLUSIVE_HW_BP
 static void read_handler(struct perf_event *bp, struct perf_sample_data *data, struct pt_regs *regs) {
 	struct perf_event_attr attr = bp->attr;
@@ -139,30 +140,37 @@ static void write_handler(struct perf_event *bp, struct perf_sample_data *data, 
 	//dump_stack();
 }
 #else
-static DEFINE_PER_CPU(unsigned long, last_bp_ip);
-static DEFINE_PER_CPU(u8[8], watched_mem);
+static DEFINE_PER_CPU(u8[AVAIL_SLOTS][8], watched_mem);
 
 enum type { A_READ = 0, A_WRITE =1 };
 static s8 access_type = 0;
 
-static inline s32 snapshot_mem(void *dst) {
-	if (access_ok((const void __user *)watch_address, sizeof(dst))) {
-		copy_from_user_nofault(dst, (const void __user *)watch_address, sizeof(dst));
-	} else {
-		copy_from_kernel_nofault(dst, (void *)watch_address, sizeof(dst));
+static inline s32 match_entry(ulong addr) {
+	for (int i = 0; i < AVAIL_SLOTS; i++) {
+		if (addr == watchpoints[i].addr)
+			return watchpoints[i].idx;
 	}
-	pr_info("Got memory sample @ 0x%lx value = %#08x\n", watch_address, *(u32 *)dst);
+	return -1;
+}
+
+static inline s32 snapshot_mem(void *dst, ulong addr) {
+	if (access_ok((const void __user *)addr, sizeof(dst))) {
+		copy_from_user_nofault(dst, (const void __user *)addr, sizeof(dst));
+	} else {
+		copy_from_kernel_nofault(dst, (void *)addr, sizeof(dst));
+	}
+	pr_info("Got memory sample @ 0x%lx value = %#08x\n", addr, *(u32 *)dst);
 	return 0;
 }
 
 static void breakpoint_handler(struct perf_event *bp, struct perf_sample_data *data, struct pt_regs *regs) {
 	preempt_disable();
-		this_cpu_write(last_bp_ip, instruction_pointer(regs));
-		u8 *mem_prev = this_cpu_ptr(watched_mem);
+		s32 idx = match_entry(bp->attr.bp_addr);
+		u8 *mem_prev = this_cpu_ptr(watched_mem[idx]);
 	preempt_enable();
 
 	u8 mem_curr[8];
-	snapshot_mem(&mem_curr);
+	snapshot_mem(&mem_curr, bp->attr.bp_addr);
 	access_type = memcmp(mem_prev, mem_curr, sizeof(mem_curr)) == 0 ? 
 		A_READ : A_WRITE;
 	
@@ -178,20 +186,15 @@ static void breakpoint_handler(struct perf_event *bp, struct perf_sample_data *d
 }
 #endif
 
-static s32 set_watchpoint(void) {
-	s32 slots_needed = HAS_READ_EXCLUSIVE_HW_BP ? 2 : 1;
-	if (get_hw_bp_slots() < slots_needed) {
-		pr_err("No available hardware breakpoint slots\n");
-		return -1;
-	}
-	ASSERT(watch_address);
-	ASSERT(watch_address % HW_BREAKPOINT_LEN == 0);
+static s32 set_watchpoint(s32 idx, ulong addr) {
+	ASSERT(addr && idx);
+	ASSERT(addr % HW_BREAKPOINT_LEN == 0);
 
 #if HAS_READ_EXCLUSIVE_HW_BP
 	struct perf_event_attr attr_R = {
 		.type = PERF_TYPE_BREAKPOINT,
-		.size = sizeof(attr_R),
-		.bp_addr = (unsigned long)watch_address,
+		.size = sizeof(struct perf_event_attr),
+		.bp_addr = addr,
 		.bp_len = HW_BREAKPOINT_LEN,
 		.bp_type = HW_BREAKPOINT_R,
 		.pinned = 1,
@@ -200,8 +203,8 @@ static s32 set_watchpoint(void) {
 
 	struct perf_event_attr attr_W = {
 		.type = PERF_TYPE_BREAKPOINT,
-		.size = sizeof(attr_R),
-		.bp_addr = (unsigned long)watch_address,
+		.size = sizeof(struct perf_event_attr),
+		.bp_addr = addr,
 		.bp_len = HW_BREAKPOINT_LEN,
 		.bp_type = HW_BREAKPOINT_W,
 		 .pinned = 1,
@@ -210,8 +213,8 @@ static s32 set_watchpoint(void) {
 #else
 	struct perf_event_attr attr_RW = {
 		.type = PERF_TYPE_BREAKPOINT,
-		.size = sizeof(attr_RW),
-		.bp_addr = (unsigned long)watch_address,
+		.size = sizeof(struct perf_event_attr),
+		.bp_addr = addr,
 		.bp_len = HW_BREAKPOINT_LEN,
 		.bp_type = HW_BREAKPOINT_RW,
 		 .pinned = 1,
@@ -221,102 +224,121 @@ static s32 set_watchpoint(void) {
 #endif
 
 #if HAS_READ_EXCLUSIVE_HW_BP
-	hw_breakpoint_R = register_wide_hw_breakpoint(&attr_R, read_handler, NULL);
-	if (IS_ERR(hw_breakpoint_R)) {
-		s32 ret = PTR_ERR(hw_breakpoint_R);
+	hw_breakpoint_R[idx] = register_wide_hw_breakpoint(&attr_R, read_handler, NULL);
+	if (IS_ERR(hw_breakpoint_R[idx])) {
+		s32 ret = PTR_ERR(hw_breakpoint_R[idx]);
 		pr_err("Failed to register READ breakpoint: %d\n", ret);
-		hw_breakpoint_R = NULL;
+		hw_breakpoint_R[idx] = NULL;
 	}
-	hw_breakpoint_W = register_wide_hw_breakpoint(&attr_W, write_handler, NULL);
-	if (IS_ERR(hw_breakpoint_W)) {
-		s32 ret = PTR_ERR(hw_breakpoint_W);
+	hw_breakpoint_W[idx] = register_wide_hw_breakpoint(&attr_W, write_handler, NULL);
+	if (IS_ERR(hw_breakpoint_W[idx])) {
+		s32 ret = PTR_ERR(hw_breakpoint_W[idx]);
 		pr_err("Failed to register WRITE breakpoint: %d\n", ret);
-		hw_breakpoint_W = NULL;
+		hw_breakpoint_W[idx] = NULL;
 	}
 #else
 	preempt_disable();
-		u8 *mem_prev = this_cpu_ptr(watched_mem);
-		snapshot_mem(mem_prev);
+		u8 *mem_prev = this_cpu_ptr(watched_mem[idx]);
+		snapshot_mem(mem_prev, addr);
 	preempt_enable();
-	hw_breakpoint_RW = register_wide_hw_breakpoint(&attr_RW, breakpoint_handler, NULL);
-	if (IS_ERR(hw_breakpoint_RW)) {
-		s32 ret = PTR_ERR(hw_breakpoint_RW);
+	hw_breakpoint_RW[idx] = register_wide_hw_breakpoint(&attr_RW, breakpoint_handler, NULL);
+	if (IS_ERR(hw_breakpoint_RW[idx])) {
+		s32 ret = PTR_ERR(hw_breakpoint_RW[idx]);
 		pr_err("Failed to register R|W breakpoint: %d\n", ret);
-		hw_breakpoint_RW = NULL;
+		hw_breakpoint_RW[idx] = NULL;
 	}
 #endif
 
-	pr_info("Watchpoint set at address: 0x%lx\n", watch_address);
+	pr_info("Watchpoint #%d set at address: 0x%lx\n", idx, addr);
 	print_debug_registers();
 	return 0;
 }
 
-static void clear_watchpoint(void) {
+static void clear_watchpoint(s32 idx) {
 	s32 cpu;
 #if HAS_READ_EXCLUSIVE_HW_BP
-	if (hw_breakpoint_R) {
+	if (hw_breakpoint_R[idx]) {
 		for_each_possible_cpu(cpu) {
-			struct perf_event **bp = per_cpu_ptr(hw_breakpoint_R, cpu);
+			struct perf_event **bp = per_cpu_ptr(hw_breakpoint_R[idx], cpu);
 			if (*bp)
 				unregister_hw_breakpoint(*bp);
 		}
-		free_percpu(hw_breakpoint_R);
-		hw_breakpoint_R = NULL;
+		free_percpu(hw_breakpoint_R[idx]);
+		hw_breakpoint_R[idx] = NULL;
 	}
 
-	if (hw_breakpoint_W) {
+	if (hw_breakpoint_W[idx]) {
 		for_each_possible_cpu(cpu) {
-			struct perf_event **bp = per_cpu_ptr(hw_breakpoint_W, cpu);
+			struct perf_event **bp = per_cpu_ptr(hw_breakpoint_W[idx], cpu);
 			if (*bp)
 				unregister_hw_breakpoint(*bp);
 		}
-		free_percpu(hw_breakpoint_W);
-		hw_breakpoint_W = NULL;
+		free_percpu(hw_breakpoint_W[idx]);
+		hw_breakpoint_W[idx] = NULL;
 	}
 #else
-	if (hw_breakpoint_RW) {
+	if (hw_breakpoint_RW[idx]) {
 		for_each_possible_cpu(cpu) {
-			struct perf_event **bp = per_cpu_ptr(hw_breakpoint_RW, cpu);
+			struct perf_event **bp = per_cpu_ptr(hw_breakpoint_RW[idx], cpu);
 			if (*bp)
 				unregister_hw_breakpoint(*bp);
 		}
-		free_percpu(hw_breakpoint_RW);
-		hw_breakpoint_RW = NULL;
+		free_percpu(hw_breakpoint_RW[idx]);
+		hw_breakpoint_RW[idx] = NULL;
 	}
 #endif
-	pr_info("Watchpoints cleared\n");
+	pr_info("Watchpoint cleared [idx@%d]\n",idx);
 }
 
 static ssize_t watch_address_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf) {
-	return sprintf(buf, "%p\n", (void*)watch_address);
+	struct watchpoint *wp = container_of(attr, struct watchpoint, attr);
+	return sprintf(buf, "0x%lx\n", wp->addr);
 }
 
 static ssize_t watch_address_store(struct kobject *kobj, struct kobj_attribute *attr,
 								   const char *buf, size_t count) {
-	s32 ret = kstrtoul(buf, 0, &watch_address);
-	if (ret)
-		return ret;
-	clear_watchpoint();
-	set_watchpoint();
+	struct watchpoint *wp = container_of(attr, struct watchpoint, attr);
+	unsigned long val = 0x0;
+	if (kstrtoul(buf, 0, &val))
+		return -EINVAL;
+
+	pr_info("Updated watchpoint[%d] from 0x%lx to 0x%lx\n", wp->idx, wp->addr, val);
+	wp->addr = val;
+	set_watchpoint(wp->idx, val);
 	return count;
 }
 
 static s32 __init watchpoint_init(void) {
-
-	s32 ret = 0;
 	pr_info("Watchpoint kernel module loaded successfully.\n");
 
 	watch_kobj = kobject_create_and_add("watchpoint", kernel_kobj);
 	ASSERT(watch_kobj);
 
-	ret = sysfs_create_file(watch_kobj, &watch_attr.attr);
-	ASSERT(ret == 0);
+	for (int idx = 0; idx < AVAIL_SLOTS; idx++) {
+		struct watchpoint *wp = &watchpoints[idx];
+		char name[8] = {0, };
+
+		wp->idx	 = idx;
+		wp->addr = (idx < num_addrs) ? watch_addrs[idx] : 0;
+
+		sysfs_attr_init(&wp->attr.attr);
+		snprintf(name, sizeof(name), "watch_%d", idx);
+
+		wp->attr.attr.name = kstrdup(name, GFP_KERNEL);
+		wp->attr.attr.mode = 0644;
+		wp->attr.show	   = watch_address_show;
+		wp->attr.store	   = watch_address_store;
+
+		if (sysfs_create_file(watch_kobj, &wp->attr.attr))
+			pr_warn("Failed to create sysfs entry for watchpoint #%d\n", idx);
+	}
 
 	return 0;
 }
 
 static void __exit watchpoint_exit(void) {
-	clear_watchpoint();
+	for (int idx = 0; idx < AVAIL_SLOTS; idx++)
+		clear_watchpoint(idx);
 	if (watch_kobj) {
 		sysfs_remove_file(watch_kobj, &watch_attr.attr);
 		kobject_put(watch_kobj);
