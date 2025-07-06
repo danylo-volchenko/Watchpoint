@@ -6,15 +6,15 @@
 
 ## Description
 
-#### This Linux kernel module sets a hardware breakpoint on a specified memory address.
+#### This Linux kernel module sets a hardware breakpoints on a specified memory addresses.
 #### When the memory address is accessed (either read or write), the module's callbacks are called, and information about access provided.
-#### On architectures that support R,W,X,RW type of hardware breakpoints it will set 2 breakpoints (1 for READ and 1 for WRITE).
-#### On architectures that do not support exclusive read (R) hardware breakpoint it will set R|W and infer access type by probing the memory before and after accesses.
+#### On architectures that support R,W,X,RW type of hardware breakpoints it will set 2 breakpoints (1 for READ and 1 for WRITE) for each watchpoint.
+#### On architectures that do not support exclusive read (R) hardware breakpoint it will set R|W and infer access type by probing the memory before and after accesses (max 4bps).
 
 ## Features
 
-- Monitor a memory address set via module parameter or sysfs entry.
-- Set a hardware breakpoint on the specified memory address.
+- Monitor a memory addresses set via module parameter or sysfs entry.
+- Set multiple hardware breakpoints on the specified memory addresses.
 - Invoke callbacks and print details about memory access.
 - Planned: dump stack of a process which accessed the memory.
 
@@ -80,7 +80,11 @@ modprobe watchpoint [watch_address=<0xYourMemoryAddress>]
 lsmod | grep watchpoint
 ```
 
-**Or use `./compile_load.sh [target_dir]` for local testing, it will compile, (re)load the module and notify you**
+**Or use:** 
+```sh
+./compile_load.sh [target_dir]
+```
+**for local testing, it will compile, (re)load the module and notify you**
 
 > [!TIP]
 > To unload the module, use `rmmod watchpoint`.
@@ -88,14 +92,18 @@ lsmod | grep watchpoint
 ### Setting watchpoint 
 **To set a watchpoint address as parameter, use:**
 ```sh
-insmod watchpoint.ko watch_address=0x1234
+insmod watchpoint.ko watch_[1..4]=0x1234
 ```
 
 **Or you can set the watchpoint address through the **sysfs** interface**:
 ```sh
-echo '0x1234' | sudo tee /sys/kernel/watchpoint/watch_address
+echo '0x1234' | sudo tee /sys/kernel/watchpoint/watch_[1..4]
 ```
 
+**Or use:**
+```sh
+./set_watchpoint <1..4> <address>
+```
 > [!IMPORTANT]
 > There is check mechanism that will make sure your address is well-aligned
 
@@ -105,9 +113,9 @@ echo '0x1234' | sudo tee /sys/kernel/watchpoint/watch_address
  gcc -o test src/test.c
  ./test # it will print the allocated memory address, wait on getchar() and start modifying the memory at given address
 ```
-Then you can
+**Then you can:**
 ```sh
-./set_watchpoint.sh <address>
+./set_watchpoint.sh <1..4> <address>
 ```
 
 To see logs, use: `sudo dmesg`, I prefer to first run it with `-C` flag to clear the logs,
